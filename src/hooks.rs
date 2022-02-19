@@ -1,5 +1,5 @@
 use crossterm::event::{
-    Event as TermEvent, KeyCode as TermKeyCode, KeyModifiers, MouseButton, MouseEventKind,
+    Event as TermEvent, KeyCode as TermKeyCode, KeyEvent, KeyModifiers, MouseButton, MouseEventKind,
 };
 use dioxus::core::*;
 
@@ -177,7 +177,7 @@ impl InnerInputState {
             wheel_delta: f64,
             mouse_data: &'b MouseData,
             wheel_data: &'b Option<WheelData>,
-        };
+        }
 
         fn layout_contains_point(layout: &Layout, point: (i32, i32)) -> bool {
             layout.location.x as i32 <= point.0
@@ -402,11 +402,12 @@ impl RinkInputHandler {
             queue: &Vec<(&'static str, Arc<dyn Any + Send + Sync>)>,
             resolved: &mut Vec<UserEvent>,
             node: &VNode,
+            dom: &VirtualDom,
         ) {
             match node {
                 VNode::Fragment(frag) => {
                     for c in frag.children {
-                        inner(queue, resolved, c);
+                        inner(queue, resolved, c, dom);
                     }
                 }
                 VNode::Element(el) => {
@@ -426,8 +427,14 @@ impl RinkInputHandler {
                         }
                     }
                     for c in el.children {
-                        inner(queue, resolved, c);
+                        inner(queue, resolved, c, dom);
                     }
+                }
+                VNode::Component(vcomp) => {
+                    let idx = vcomp.scope.get().unwrap();
+                    let new_node = dom.get_scope(idx).unwrap().root_node();
+                    inner(queue, resolved, new_node, dom);
+                    return;
                 }
                 _ => (),
             }
@@ -453,7 +460,7 @@ impl RinkInputHandler {
             .map(|e| (e.0, e.1.into_any()))
             .collect();
 
-        inner(&events, &mut resolved_events, node);
+        inner(&events, &mut resolved_events, node, dom);
 
         resolved_events
     }
@@ -462,26 +469,7 @@ impl RinkInputHandler {
 // translate crossterm events into dioxus events
 fn get_event(evt: TermEvent) -> Option<(&'static str, EventData)> {
     let (name, data): (&str, EventData) = match evt {
-        TermEvent::Key(k) => {
-            let key = translate_key_code(k.code)?;
-            (
-                "keydown",
-                // from https://developer.mozilla.org/en-US/docs/Web/API/KeyboardEvent
-                EventData::Keyboard(KeyboardData {
-                    char_code: key.raw_code(),
-                    key: format!("{key:?}"),
-                    key_code: key,
-                    alt_key: k.modifiers.contains(KeyModifiers::ALT),
-                    ctrl_key: k.modifiers.contains(KeyModifiers::CONTROL),
-                    meta_key: false,
-                    shift_key: k.modifiers.contains(KeyModifiers::SHIFT),
-                    locale: Default::default(),
-                    location: 0x00,
-                    repeat: Default::default(),
-                    which: Default::default(),
-                }),
-            )
-        }
+        TermEvent::Key(k) => ("keydown", translate_key_event(k)?),
         TermEvent::Mouse(m) => {
             let (x, y) = (m.column.into(), m.row.into());
             let alt = m.modifiers.contains(KeyModifiers::ALT);
@@ -544,69 +532,141 @@ fn get_event(evt: TermEvent) -> Option<(&'static str, EventData)> {
     Some((name, data))
 }
 
-fn translate_key_code(c: TermKeyCode) -> Option<KeyCode> {
-    match c {
-        TermKeyCode::Backspace => Some(KeyCode::Backspace),
-        TermKeyCode::Enter => Some(KeyCode::Enter),
-        TermKeyCode::Left => Some(KeyCode::LeftArrow),
-        TermKeyCode::Right => Some(KeyCode::RightArrow),
-        TermKeyCode::Up => Some(KeyCode::UpArrow),
-        TermKeyCode::Down => Some(KeyCode::DownArrow),
-        TermKeyCode::Home => Some(KeyCode::Home),
-        TermKeyCode::End => Some(KeyCode::End),
-        TermKeyCode::PageUp => Some(KeyCode::PageUp),
-        TermKeyCode::PageDown => Some(KeyCode::PageDown),
-        TermKeyCode::Tab => Some(KeyCode::Tab),
-        TermKeyCode::BackTab => None,
-        TermKeyCode::Delete => Some(KeyCode::Delete),
-        TermKeyCode::Insert => Some(KeyCode::Insert),
-        TermKeyCode::F(fn_num) => match fn_num {
-            1 => Some(KeyCode::F1),
-            2 => Some(KeyCode::F2),
-            3 => Some(KeyCode::F3),
-            4 => Some(KeyCode::F4),
-            5 => Some(KeyCode::F5),
-            6 => Some(KeyCode::F6),
-            7 => Some(KeyCode::F7),
-            8 => Some(KeyCode::F8),
-            9 => Some(KeyCode::F9),
-            10 => Some(KeyCode::F10),
-            11 => Some(KeyCode::F11),
-            12 => Some(KeyCode::F12),
-            _ => None,
-        },
-        TermKeyCode::Char(c) => match c.to_uppercase().next().unwrap() {
-            'A' => Some(KeyCode::A),
-            'B' => Some(KeyCode::B),
-            'C' => Some(KeyCode::C),
-            'D' => Some(KeyCode::D),
-            'E' => Some(KeyCode::E),
-            'F' => Some(KeyCode::F),
-            'G' => Some(KeyCode::G),
-            'H' => Some(KeyCode::H),
-            'I' => Some(KeyCode::I),
-            'J' => Some(KeyCode::J),
-            'K' => Some(KeyCode::K),
-            'L' => Some(KeyCode::L),
-            'M' => Some(KeyCode::M),
-            'N' => Some(KeyCode::N),
-            'O' => Some(KeyCode::O),
-            'P' => Some(KeyCode::P),
-            'Q' => Some(KeyCode::Q),
-            'R' => Some(KeyCode::R),
-            'S' => Some(KeyCode::S),
-            'T' => Some(KeyCode::T),
-            'U' => Some(KeyCode::U),
-            'V' => Some(KeyCode::V),
-            'W' => Some(KeyCode::W),
-            'X' => Some(KeyCode::X),
-            'Y' => Some(KeyCode::Y),
-            'Z' => Some(KeyCode::Z),
-            _ => None,
-        },
-        TermKeyCode::Null => None,
-        TermKeyCode::Esc => Some(KeyCode::Escape),
-    }
+fn translate_key_event(event: KeyEvent) -> Option<EventData> {
+    let (code, key_str);
+    if let TermKeyCode::Char(c) = event.code {
+        code = match c {
+            'A'..='Z' | 'a'..='z' => match c.to_ascii_uppercase() {
+                'A' => KeyCode::A,
+                'B' => KeyCode::B,
+                'C' => KeyCode::C,
+                'D' => KeyCode::D,
+                'E' => KeyCode::E,
+                'F' => KeyCode::F,
+                'G' => KeyCode::G,
+                'H' => KeyCode::H,
+                'I' => KeyCode::I,
+                'J' => KeyCode::J,
+                'K' => KeyCode::K,
+                'L' => KeyCode::L,
+                'M' => KeyCode::M,
+                'N' => KeyCode::N,
+                'O' => KeyCode::O,
+                'P' => KeyCode::P,
+                'Q' => KeyCode::Q,
+                'R' => KeyCode::R,
+                'S' => KeyCode::S,
+                'T' => KeyCode::T,
+                'U' => KeyCode::U,
+                'V' => KeyCode::V,
+                'W' => KeyCode::W,
+                'X' => KeyCode::X,
+                'Y' => KeyCode::Y,
+                'Z' => KeyCode::Z,
+                _ => return None,
+            },
+            ' ' => KeyCode::Space,
+            '[' => KeyCode::OpenBracket,
+            '{' => KeyCode::OpenBracket,
+            ']' => KeyCode::CloseBraket,
+            '}' => KeyCode::CloseBraket,
+            ';' => KeyCode::Semicolon,
+            ':' => KeyCode::Semicolon,
+            ',' => KeyCode::Comma,
+            '<' => KeyCode::Comma,
+            '.' => KeyCode::Period,
+            '>' => KeyCode::Period,
+            '1' => KeyCode::Num1,
+            '2' => KeyCode::Num2,
+            '3' => KeyCode::Num3,
+            '4' => KeyCode::Num4,
+            '5' => KeyCode::Num5,
+            '6' => KeyCode::Num6,
+            '7' => KeyCode::Num7,
+            '8' => KeyCode::Num8,
+            '9' => KeyCode::Num9,
+            '0' => KeyCode::Num0,
+            '!' => KeyCode::Num1,
+            '@' => KeyCode::Num2,
+            '#' => KeyCode::Num3,
+            '$' => KeyCode::Num4,
+            '%' => KeyCode::Num5,
+            '^' => KeyCode::Num6,
+            '&' => KeyCode::Num7,
+            '*' => KeyCode::Num8,
+            '(' => KeyCode::Num9,
+            ')' => KeyCode::Num0,
+            // numpad charicter are ambiguous to tui
+            // '*' => KeyCode::Multiply,
+            // '/' => KeyCode::Divide,
+            // '-' => KeyCode::Subtract,
+            // '+' => KeyCode::Add,
+            '+' => KeyCode::EqualSign,
+            '-' => KeyCode::Dash,
+            '_' => KeyCode::Dash,
+            '\'' => KeyCode::SingleQuote,
+            '"' => KeyCode::SingleQuote,
+            '\\' => KeyCode::BackSlash,
+            '|' => KeyCode::BackSlash,
+            '/' => KeyCode::ForwardSlash,
+            '?' => KeyCode::ForwardSlash,
+            '=' => KeyCode::EqualSign,
+            '`' => KeyCode::GraveAccent,
+            '~' => KeyCode::GraveAccent,
+            _ => return None,
+        };
+        key_str = c.to_string();
+    } else {
+        code = match event.code {
+            TermKeyCode::Esc => KeyCode::Escape,
+            TermKeyCode::Backspace => KeyCode::Backspace,
+            TermKeyCode::Enter => KeyCode::Enter,
+            TermKeyCode::Left => KeyCode::LeftArrow,
+            TermKeyCode::Right => KeyCode::RightArrow,
+            TermKeyCode::Up => KeyCode::UpArrow,
+            TermKeyCode::Down => KeyCode::DownArrow,
+            TermKeyCode::Home => KeyCode::Home,
+            TermKeyCode::End => KeyCode::End,
+            TermKeyCode::PageUp => KeyCode::PageUp,
+            TermKeyCode::PageDown => KeyCode::PageDown,
+            TermKeyCode::Tab => KeyCode::Tab,
+            TermKeyCode::Delete => KeyCode::Delete,
+            TermKeyCode::Insert => KeyCode::Insert,
+            TermKeyCode::F(fn_num) => match fn_num {
+                1 => KeyCode::F1,
+                2 => KeyCode::F2,
+                3 => KeyCode::F3,
+                4 => KeyCode::F4,
+                5 => KeyCode::F5,
+                6 => KeyCode::F6,
+                7 => KeyCode::F7,
+                8 => KeyCode::F8,
+                9 => KeyCode::F9,
+                10 => KeyCode::F10,
+                11 => KeyCode::F11,
+                12 => KeyCode::F12,
+                _ => return None,
+            },
+            TermKeyCode::BackTab => return None,
+            TermKeyCode::Null => return None,
+            _ => return None,
+        };
+        key_str = format!("{code:?}");
+    };
+    // from https://developer.mozilla.org/en-US/docs/Web/API/KeyboardEvent
+    Some(EventData::Keyboard(KeyboardData {
+        char_code: code.raw_code(),
+        key: key_str.to_string(),
+        key_code: code,
+        alt_key: event.modifiers.contains(KeyModifiers::ALT),
+        ctrl_key: event.modifiers.contains(KeyModifiers::CONTROL),
+        meta_key: false,
+        shift_key: event.modifiers.contains(KeyModifiers::SHIFT),
+        locale: Default::default(),
+        location: 0x00,
+        repeat: Default::default(),
+        which: Default::default(),
+    }))
 }
 
 fn clone_mouse_data(m: &MouseData) -> MouseData {

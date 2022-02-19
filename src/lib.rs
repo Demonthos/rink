@@ -14,7 +14,7 @@ use std::{
 };
 use stretch2::{prelude::Size, Stretch};
 use style::RinkStyle;
-use tui::{backend::CrosstermBackend, Terminal};
+use tui::{backend::CrosstermBackend, Terminal, TerminalOptions, Viewport};
 
 mod attributes;
 mod config;

@@ -177,7 +177,7 @@ impl InnerInputState {
             wheel_delta: f64,
             mouse_data: &'b MouseData,
             wheel_data: &'b Option<WheelData>,
-        };
+        }
 
         fn layout_contains_point(layout: &Layout, point: (i32, i32)) -> bool {
             layout.location.x as i32 <= point.0
